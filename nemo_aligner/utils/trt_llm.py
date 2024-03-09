@@ -67,15 +67,13 @@ class GPTGenerateTRTLLM():
                 max_input_token=self.max_context_length,
                 max_output_token=self.max_generation_length,
                 max_batch_size=self.cfg.ppo.get('rollout_micro_batch_size'),
-                use_refit=True,
-                model_type="llama")
+                use_refit=True)
             self._trtllm_model_compiled = True
         else:
             self.trt_llm_exporter.refit(
                 nemo_model = model, 
                 nemo_model_config = self.cfg, 
             )
-
 
     def generate(self, inputs):
         stop_words = self.stop_words
