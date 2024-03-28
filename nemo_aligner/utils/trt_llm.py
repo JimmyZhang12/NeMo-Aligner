@@ -13,7 +13,6 @@ class GPTGenerateTRTLLM():
         self.tokenizer = tokenizer
         self.max_generation_length = self.cfg.ppo.length_params.get('max_length')
         self.max_context_length = 2048
-        self.max_attn_window_size = 4096
         self.generation_batch_size = self.cfg.ppo.get('rollout_micro_batch_size')
         self._trtllm_model_compiled = False
 
@@ -28,7 +27,6 @@ class GPTGenerateTRTLLM():
             top_k=self.cfg.ppo.sampling_params.get('top_k'),
             top_p=self.cfg.ppo.sampling_params.get('top_p'),
             max_new_tokens=self.max_generation_length,
-            max_attention_window_size=self.max_attn_window_size,
             stop_words_list=self.stop_words
         )
 
@@ -77,6 +75,8 @@ class GPTGenerateTRTLLM():
 
     def generate(self, inputs):
         prompt_tokens, prompt_lengths = inputs
+
+        print(f"prompt lengths {prompt_lengths}")
 
         batch_input_ids = []
         for idx in range(prompt_tokens.shape[0]):

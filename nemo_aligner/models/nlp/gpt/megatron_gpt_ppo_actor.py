@@ -290,6 +290,7 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
         prompt_lengths = inference_batch["length"].cuda(non_blocking=True)
         inputs = (prompt_tokens, prompt_lengths)
 
+        tic = time.time()
         if self.use_trtllm_generation:
             actor_output = self.trtllm_generate.generate(inputs)
         else:
@@ -306,7 +307,8 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
             max_generation_length=self._length_params["max_length"],
             max_sequence_length=self.cfg.encoder_seq_length,
         )
-
+        toc = time.time()
+        print(f"GENERATE took {tic-toc} prompt len: {prompt_lengths} resp len: {response_lengths}")
         rollout_batch = {
             "response_tokens": response_tokens,
             "response_lengths": response_lengths,
