@@ -66,7 +66,8 @@ class GPTGenerateTRTLLM():
                 max_input_len=self.max_context_length,
                 max_output_len=self.max_generation_length,
                 max_batch_size=self.cfg.ppo.get('rollout_micro_batch_size'),
-                use_refit=True)
+                use_refit=True,
+                reshard_model=self.reshard_model)
             self._trtllm_model_compiled = True
         else:
             self.trt_llm_exporter.refit(
