@@ -320,7 +320,10 @@ def build_dataloader(
     """Buld dataloader given an input dataset."""
 
     #TRTLLM resharding
-    if cfg.model.ppo.use_trtllm and parallel_state.get_pipeline_model_parallel_world_size() > 1:
+    if cfg.model.ppo.trtllm.enabled \
+        and cfg.model.ppo.trtllm.reshard \
+        and parallel_state.get_pipeline_model_parallel_world_size() > 1:
+
         from nemo.utils import AppState
         app_state = AppState()
 

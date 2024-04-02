@@ -78,7 +78,7 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
         self.ratio_eps = self.cfg.ppo.ratio_eps
         self.forward_micro_batch_size = self.cfg.ppo.forward_micro_batch_size
         
-        self.use_trtllm_generation = self.cfg.ppo.use_trtllm
+        self.use_trtllm_generation = self.cfg.ppo.trtllm.enabled
         self.orig_dp_rank = parallel_state.get_data_parallel_rank()
 
         if self.use_trtllm_generation:
@@ -308,7 +308,7 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
             max_sequence_length=self.cfg.encoder_seq_length,
         )
         toc = time.time()
-        print(f"GENERATE took {tic-toc} prompt len: {prompt_lengths} resp len: {response_lengths}")
+        print(f"GENERATE took {toc-tic} prompt len: {prompt_lengths} resp len: {response_lengths}")
         rollout_batch = {
             "response_tokens": response_tokens,
             "response_lengths": response_lengths,

@@ -14,11 +14,12 @@ class GPTGenerateTRTLLM():
         self.max_generation_length = self.cfg.ppo.length_params.get('max_length')
         self.max_context_length = 2048
         self.generation_batch_size = self.cfg.ppo.get('rollout_micro_batch_size')
-        self._trtllm_model_compiled = False
+        self.reshard_model = self.cfg.ppo.trtllm.reshard
 
         self._import_tensorrt_llm()
         self.trt_llm_exporter = TRTExport(trt_model_dir, load_model=False)
         self.stop_words = self._create_stop_words()
+        self._trtllm_model_compiled = False
 
         self.sampling_config = tensorrt_llm.runtime.SamplingConfig(
             end_id=tokenizer.eos_id, 
@@ -76,8 +77,6 @@ class GPTGenerateTRTLLM():
     def generate(self, inputs):
         prompt_tokens, prompt_lengths = inputs
 
-        print(f"prompt lengths {prompt_lengths}")
-
         batch_input_ids = []
         for idx in range(prompt_tokens.shape[0]):
             batch_input_ids.append(prompt_tokens[idx][0:prompt_lengths[idx]].cpu())
@@ -87,14 +86,20 @@ class GPTGenerateTRTLLM():
             sampling_config=self.sampling_config,
             streaming=False)
 
-        # output_ids shape [mbs, beam dim, sequence len]
-        # remove beam dim
+        # remove beam dim from output_ids: [mbs, beam_dim, sequence len]
         mbs = output_ids.shape[0]
         if mbs == 1:
             output_ids = output_ids.view([1,output_ids.shape[-1]])
         else:
             output_ids = output_ids.squeeze()
         output_ids = output_ids.to(torch.int64)
+
+        # print(output_ids)
+        #broadcast output to all PP ranks
+        if parallel_state.get_pipeline_model_parallel_world_size() > 1 and not self.reshard_model:  
+            group = parallel_state.get_pipeline_model_parallel_group()
+            src = parallel_state.get_pipeline_model_parallel_first_rank()
+            output_ids = broadcast_2d_tensor(output_ids, src, group, dtype=output_ids.dtype)
 
         output_ids = torch.Tensor.tolist(output_ids)
         sentences = [self.tokenizer.ids_to_text(output) for output in output_ids]
@@ -106,6 +111,7 @@ class GPTGenerateTRTLLM():
         return output
 
 
-    def free(self):        
+    def free(self):       
+        return
         self.trt_llm_exporter.unload_engine(keep_generate_session=True)
         torch.cuda.empty_cache()

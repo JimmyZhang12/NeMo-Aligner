@@ -129,7 +129,7 @@ class PPOTrainer:
         self.rm_critic = rm_critic
         self.logger = logger
         self.ckpt_callback = ckpt_callback
-        self.use_trtllm_reshard = self.cfg.use_trtllm and parallel_state.get_pipeline_model_parallel_world_size() > 1
+        self.use_trtllm_reshard = self.cfg.trtllm.enabled and self.cfg.trtllm.reshard and parallel_state.get_pipeline_model_parallel_world_size() > 1
 
         self.consumed_samples = 0
         self.epoch = 0
