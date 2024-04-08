@@ -93,14 +93,8 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
             advantages = batch["advantages"]
             mask = batch["mask"]
             prev_logprobs = batch["prev_logprobs"]
-
-            attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
-                data=response_tokens,
-                eod_token=self.tokenizer.eos_id,
-                reset_position_ids=False,
-                reset_attention_mask=False,
-                eod_mask_loss=False,
-            )
+            attention_mask = batch["attention_mask"]
+            position_ids = batch["position_ids"]
 
             batch = {
                 "tokens": response_tokens,
@@ -307,12 +301,26 @@ class MegatronGPTActorModel(MegatronGPTModel, AlignableGenerativeInterface):
             max_generation_length=self._length_params["max_length"],
             max_sequence_length=self.cfg.encoder_seq_length,
         )
+
+        attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+            data=response_tokens,
+            eod_token=self.tokenizer.eos_id,
+            reset_position_ids=False,
+            reset_attention_mask=False,
+            eod_mask_loss=False,
+        )
+        shape = list(attention_mask.shape)
+        shape[0] = attention_mask.shape[0] * position_ids.shape[0]
+        attention_mask = attention_mask.expand(shape)
+
         toc = time.time()
-        print(f"GENERATE took {toc-tic} prompt len: {prompt_lengths} resp len: {response_lengths}")
+        print(f"GENERATE took {tic-toc} prompt len: {prompt_lengths} resp len: {response_lengths}")
         rollout_batch = {
             "response_tokens": response_tokens,
             "response_lengths": response_lengths,
             "prompt_lengths": prompt_lengths,
+            "attention_mask": attention_mask,
+            "position_ids" : position_ids,
         }
 
         # return in GPU, trainer needs to move to cpu

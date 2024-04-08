@@ -85,6 +85,16 @@ def shard_rollout_batch_from_dp_to_pp(rollout_batches, pad_id):
                 dtype=local_output.dtype,
                 device=torch.cuda.current_device(),
             )
+            torch.distributed.all_gather_into_tensor(output_tensor, local_output, group=group)
+
+        elif key == "attention_mask" or key == "position_ids":
+            list_of_things = [r[key] for r in rollout_batches]
+
+            local_output = torch.cat(list_of_things).cuda()
+            weight_list = [torch.zeros_like(local_output) for _ in range(pp_group_size)]
+
+            torch.distributed.all_gather(weight_list, local_output, group=group)
+            output_tensor = torch.cat(weight_list)
 
         else:
             list_of_things = [r[key] for r in rollout_batches]
@@ -94,8 +104,8 @@ def shard_rollout_batch_from_dp_to_pp(rollout_batches, pad_id):
                 dtype=local_output.dtype,
                 device=torch.cuda.current_device(),
             )
+            torch.distributed.all_gather_into_tensor(output_tensor, local_output, group=group)
 
-        torch.distributed.all_gather_into_tensor(output_tensor, local_output, group=group)
         new_rollout_batch[key] = output_tensor
     rollout_batches = list(get_iterator_k_split(new_rollout_batch, num_rollout_batches))
 
@@ -203,6 +213,9 @@ class PPOTrainer:
                 mask=mask,
             )
 
+            pos_ids = rollout_batch['position_ids']
+            attn_mask = rollout_batch['attention_mask']
+
             # collect everything we need to train PPO
             ppo_rollout_data["mask"].extend(post_process_tensor(mask))
             ppo_rollout_data["advantages"].extend(post_process_tensor(advantages))
@@ -211,7 +224,8 @@ class PPOTrainer:
             # for the critic
             ppo_rollout_data["values"].extend(post_process_tensor(values))
             ppo_rollout_data["returns"].extend(post_process_tensor(returns))
-
+            ppo_rollout_data["attention_mask"].extend(post_process_tensor(attn_mask))
+            ppo_rollout_data["position_ids"].extend(post_process_tensor(pos_ids))
             # compute metrics
             # NOTE: this metric is not accumulated globally so it will differ between DP ranks
             ppo_rollout_metrics["init_policy_kl"] += (
