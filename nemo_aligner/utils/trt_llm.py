@@ -1,10 +1,13 @@
-from megatron.core import parallel_state
 import torch 
+import tensorrt_llm
+from typing import List
 
 from nemo_aligner.utils.distributed import broadcast_2d_tensor
 from nemo.collections.nlp.modules.common.text_generation_utils import get_model_parallel_src_rank
-from typing import List
-
+from nemo.export import TensorRTLLM
+from nemo.export.trt_llm.nemo_utils import to_word_list_format
+from nemo.export.trt_llm.nemo.nemo_ckpt_convert import build_tokenizer
+from megatron.core import parallel_state
 
 
 class GPTGenerateTRTLLM():
@@ -16,10 +19,15 @@ class GPTGenerateTRTLLM():
         self.generation_batch_size = self.cfg.ppo.get('rollout_micro_batch_size')
         self.reshard_model = self.cfg.ppo.trtllm.reshard
 
-        self._import_tensorrt_llm()
-        self.trt_llm_exporter = TRTExport(trt_model_dir, load_model=False)
-        self.stop_words = self._create_stop_words()
+        self.trt_llm_exporter = TensorRTLLM(trt_model_dir, load_model=False)
         self._trtllm_model_compiled = False
+
+        #TODO: Move this logic to nemo.export after TRTLLM0.9 support
+        end_strings = list(self.cfg.ppo.sampling_params.get('end_strings'))
+        end_strings = [[','.join(end_strings)] for _ in range(self.generation_batch_size)]
+        stop_list = to_word_list_format(
+            end_strings, build_tokenizer(self.tokenizer), ref_str="green tea icecream")
+        stop_list = torch.from_numpy(stop_list).cuda().contiguous()
 
         self.sampling_config = tensorrt_llm.runtime.SamplingConfig(
             end_id=tokenizer.eos_id, 
@@ -28,34 +36,8 @@ class GPTGenerateTRTLLM():
             top_k=self.cfg.ppo.sampling_params.get('top_k'),
             top_p=self.cfg.ppo.sampling_params.get('top_p'),
             max_new_tokens=self.max_generation_length,
-            stop_words_list=self.stop_words
+            stop_words_list=stop_list
         )
-
-    def _import_tensorrt_llm(self):        
-        from mpi4py import MPI 
-        from nemo.export import TensorRTLLM as TRTExport
-        from nemo.export.trt_llm.tensorrt_llm_run import forward as trtllm_forward
-        import tensorrt_llm
-
-        globals()["TRTExport"] = TRTExport
-        globals()["tensorrt_llm"] = tensorrt_llm
-        globals()["trtllm_forward"] = trtllm_forward
-        
-    def _create_stop_words(self):
-        # stop_id = self.tokenizer.text_to_ids("<extra_id_1>")
-        stop_id = [29966, 17833, 29918, 333, 29918, 29896, 29958]
-        eos_id = self.tokenizer.eos_id
-        stop_strings = [stop_id]
-        stop_tokens = [[eos_id]]
-
-        stop_words = [[],[]]
-        for w in (stop_strings+stop_tokens):
-            stop_words[0] += w
-            stop_words[1].append(len(stop_words[0]))
-        stop_words[1] += [-1] * (len(stop_words[0]) - len(stop_words[1]))
-
-        stop_words = torch.IntTensor(stop_words).cuda()
-        return stop_words.unsqueeze(0).repeat(self.generation_batch_size,1,1)
 
     def refit(self, model):
         if not self._trtllm_model_compiled:
@@ -74,6 +56,7 @@ class GPTGenerateTRTLLM():
                 nemo_model = model, 
                 nemo_model_config = self.cfg, 
             )
+
 
     def generate(self, inputs):
         prompt_tokens, prompt_lengths = inputs
@@ -113,6 +96,6 @@ class GPTGenerateTRTLLM():
 
 
     def free(self):       
-        return
+        return #TODO unloading engine currently not working for CPP runtime
         self.trt_llm_exporter.unload_engine(keep_generate_session=True)
         torch.cuda.empty_cache()
