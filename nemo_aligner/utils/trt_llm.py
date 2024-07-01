@@ -2,8 +2,9 @@ import tensorrt_llm
 import torch
 
 from nemo.export import TensorRTLLM
-from nemo.export.trt_llm.nemo.nemo_ckpt_convert import build_tokenizer
-from nemo.export.trt_llm.nemo_utils import to_word_list_format
+from nemo.export.trt_llm.nemo_ckpt_loader.nemo_file import build_tokenizer
+from nemo.export.trt_llm.tensorrt_llm_run import to_word_list_format, tensorrt_llm_worker_context
+from nemo.export.trt_llm.converter.model_to_trt_llm_ckpt import dist_model_to_trt_llm_ckpt
 from nemo.utils import logging
 from nemo_aligner.utils import parallel_state
 from nemo_aligner.utils.distributed import broadcast_2d_tensor_within_mp
@@ -20,12 +21,11 @@ class GPTGenerateTRTLLM:
         self.max_input_tokens = self.cfg.ppo.trt_llm.get("max_input_tokens", 4096)
         self.generation_batch_size = self.cfg.ppo.get("rollout_micro_batch_size", 4)
         self.unload_engine_train = self.cfg.ppo.trt_llm.get("unload_engine_train", False)
-        self.trt_model_type = self.cfg.ppo.trt_llm.get("model_type", "LLaMAForCausalLM")
+        self.trt_model_type = self.cfg.ppo.trt_llm.get("model_type", "gptnext")
 
         self.trt_llm_exporter = TensorRTLLM(trt_model_dir, load_model=False)
         self._trtllm_model_compiled = False
 
-        # TODO: Move this logic to nemo.export after TRTLLM0.9 support
         end_strings = list(self.cfg.ppo.sampling_params.get("end_strings"))
         end_strings = [[",".join(end_strings)] for _ in range(self.generation_batch_size)]
         stop_list = to_word_list_format(end_strings, build_tokenizer(self.tokenizer), ref_str="green tea icecream")
@@ -43,24 +43,27 @@ class GPTGenerateTRTLLM:
             output_sequence_lengths=True,
         )
 
-    def refit(self, model):
+    def refit(self, model):        
         if not self._trtllm_model_compiled:
+            global_devices = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(global_devices, torch.cuda.current_device())
+            gpus_per_node = max(global_devices) + 1
+
             self.trt_llm_exporter.build(
-                nemo_model=model,
-                nemo_model_config=self.cfg,
-                trt_model_type=self.trt_model_type,
+                model=model,
+                model_config=self.cfg,
+                model_type=self.trt_model_type,
                 tokenizer=self.tokenizer,
+                gpus_per_node=gpus_per_node,
                 max_input_len=self.max_input_len,
-                max_input_tokens=self.max_input_tokens,
                 max_output_len=self.max_generation_length,
                 max_batch_size=self.generation_batch_size,
+                use_refit=True,
                 reshard_model=self.cfg.ppo.trt_llm.get("reshard", True),
             )
             self._trtllm_model_compiled = True
         else:
-            self.trt_llm_exporter.refit(
-                nemo_model=model, nemo_model_config=self.cfg,
-            )
+            self.trt_llm_exporter.refit(model, self.cfg)
 
     def generate(self, inputs):
         prompt_tokens, prompt_lengths = inputs
@@ -69,20 +72,33 @@ class GPTGenerateTRTLLM:
         for idx in range(prompt_tokens.shape[0]):
             batch_input_ids.append(prompt_tokens[idx][0 : prompt_lengths[idx]].cpu())
 
-        output_dict = self.trt_llm_exporter.model_runner.generate(
+        output_dict = tensorrt_llm_worker_context.decoder.generate(
             batch_input_ids=batch_input_ids, sampling_config=self.sampling_config, streaming=False
         )
 
         # remove beam dim from output_ids: [mbs, beam_dim, sequence len]
         output_ids = torch.squeeze(output_dict["output_ids"], dim=1).long()
         resp_lens = torch.squeeze(output_dict["sequence_lengths"], dim=1).long()
-
-        # broadcast output to all PP ranks
-        if not self.trt_llm_exporter.reshard_model:
-            output_ids = broadcast_2d_tensor_within_mp(output_ids, dtype=output_ids.dtype)
+        
+        #TRTLLM with PP erroneously returns output as [prompt, padding, response]
+        #So, reformat here to be: [prompt, response, padding]
+        if parallel_state.get_pipeline_model_parallel_world_size() > 1:
+            max_prompt_len = prompt_lengths.max().item()
+            _output_ids = torch.full_like(input=output_ids, fill_value=self.tokenizer.eos_id)
+            for idx in range(prompt_tokens.shape[0]):
+                gen_len = (resp_lens[idx]-prompt_lengths[idx]).item()
+                response = output_ids[idx, max_prompt_len:max_prompt_len+gen_len]
+                prompt_response = torch.cat((prompt_tokens[idx][:prompt_lengths[idx]],response))
+                _output_ids[idx, :prompt_response.size(0)] = prompt_response
+            output_ids = _output_ids
 
         max_len = (prompt_lengths + resp_lens).max().item()
         output_ids = output_ids[..., :max_len]
+        output_ids = output_ids.contiguous()
+
+        # broadcast output to all PP ranks
+        if parallel_state.get_pipeline_model_parallel_world_size() > 1:
+            output_ids = broadcast_2d_tensor_within_mp(output_ids, dtype=output_ids.dtype)
 
         max_id = torch.max(output_ids).item()
         if max_id > self.tokenizer.vocab_size:
